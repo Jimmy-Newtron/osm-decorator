@@ -1,80 +1,68 @@
 package io.github.osmDecorator
 
-import java.io.File
 import java.net.URL
+import java.util.UUID
 
 import com.typesafe.config.ConfigFactory
-import geotrellis.geotools.GridCoverage2DConverters
-import geotrellis.raster.{Tile, TileLayout}
-import geotrellis.raster.io.geotiff.SinglebandGeoTiff
 import geotrellis.raster.resample.Bilinear
-import geotrellis.spark.io.LayerHeader
+import geotrellis.spark.TileLayerMetadata
 import geotrellis.spark.io.hadoop.Implicits._
-import geotrellis.spark.partition.Implicits._
-import geotrellis.spark.tiling._
-import geotrellis.spark.{Bounds, ContextRDD, LayerId, Metadata, SpatialKey, TileLayerMetadata, TileLayerRDD}
-import geotrellis.spark.io.file.{FileAttributeStore, FileLayerReader}
-import geotrellis.spark.merge.RDDLayoutMerge
 import geotrellis.spark.tiling.FloatingLayoutScheme
 import geotrellis.spark.util.SparkUtils
+import geotrellis.spark._
+import geotrellis.spark.tiling._
+import geotrellis.raster._
+import geotrellis.vector._
+import org.apache.spark.HashPartitioner
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.magellan.dsl.expressions._
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.lit
-import geotrellis.vector.Point
 
 object OsmDecorator extends App {
 
   val home = ConfigFactory.systemEnvironment().getString("HOME")
-  System.out.println(ConfigFactory.systemEnvironment().toString)
   val config = ConfigFactory.parseURL(new URL(s"file:///$home/Data/Configurations/OsmDecorator.conf")).resolve()
   System.out.println(config.toString)
 
   val sc = SparkUtils.createLocalSparkContext("local[*]", "OsmDecorator")
   val spark = SparkSession.builder().config(sc.getConf).getOrCreate()
-
+  val partitioner = new HashPartitioner(100)
   import spark.implicits._
 
-  val nodes = spark.read.parquet(config.getString("osm.parquet.nodes.path")).as[OsmNode]
-  val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
-  //val relations = spark.read.schema().parquet(config.getString("osm.parquet.relations.path"))
-
+  // Prepare RDD that reads the elevation from NASA files
   val demFolder = new URL(config.getString("dem.tiff.folder.path")).getPath
-  val tilesRDD = sc.hadoopGeoTiffRDD(demFolder)
-  val (_, rasterMetaData) = TileLayerMetadata.fromRdd(tilesRDD, FloatingLayoutScheme(512))
-  tilesRDD.tileToLayout(rasterMetaData.cellType, rasterMetaData.layout, Bilinear)
-  println(rasterMetaData.toString)
-  //val reader = FileLayerReader(demFolder)(sc)
-  //val layerId = LayerId("elevation", 0)
-  //val header = reader.attributeStore.readHeader[LayerHeader](layerId)
-  //println(header.toString())
-  //val rdd = reader.read[SpatialKey, Tile, TileLayerMetadata[SpatialKey]](layerId)
-  //rdd.take(50).foreach(println(_))
+  val tilesRDD: RDD[(ProjectedExtent, Tile)] = sc.hadoopGeoTiffRDD(demFolder)
 
-  //val demTiffs = folder.listFiles().map(file => (file, SinglebandGeoTiff(file.getAbsolutePath)))
+  //println(tilesRDD.count())
 
-  //val covs = demTiffs.map(tiff => GridCoverage2DConverters.convertToGridCoverage2D(tiff._2.raster, tiff._2.crs))
+  val (_, rasterMetaData) = TileLayerMetadata.fromRdd(tilesRDD, FloatingLayoutScheme(64))
+  val layoutDefinition = rasterMetaData.layout
 
-  //val geoTiff = TileStitcher.stitch(geoTiffs.map(record => (record.tile, (0,0))).toIterable, 5, 5)
-  //val slope = Slope(geoTiff,Square(1),None,new CellSize(5,5),8)
-  /*println(geoTiff.extent.toString())
-  println(geoTiff.tags.toString)
-  println(geoTiff.options.toString)
-  println(geoTiff.tile.asciiDraw())*/
+  val indexedTiles: RDD[(SpatialKey, Feature[Geometry, (ProjectedExtent, Tile)])] = tilesRDD.map { record => Feature(record._1.extent.toPolygon(), record) }.clipToGrid(layoutDefinition)
+  val rddPoly/*: RDD[(SpatialKey, Iterable[Feature[Geometry, (ProjectedExtent, Tile)]])]*/ = indexedTiles.groupByKey(partitioner).map(x => (x._1,x._2.size))
+  //val magellanTilesRdd = tilesRDD.map(tile=> (Polygon(Array(0),tile._1.extent.toPolygon().vertices.map(point => Point(point.x, point.y))) -> tile)).toDF()
+  rddPoly.take(30).foreach(println(_))
 
   // NODES decoration
-  //covs.map(cov => cov.evaluate(new DirectPosition2D(cov.getCoordinateReferenceSystem, , )))
-  val decoratedNodes = nodes.rdd.map(node => (Point(node.longitude,node.latitude), node))
+  val nodes = spark.read.parquet(config.getString("osm.parquet.nodes.path")).as[OsmNode]
+  val indexedNodes: RDD[(SpatialKey,OsmNode)] = nodes.rdd.map(node => (layoutDefinition.mapTransform.pointToKey(node.longitude,node.latitude), node))
+  val rddPoints = indexedNodes.groupByKey(partitioner)
+
+  indexedTiles.map{x => println(x._1.extent(layoutDefinition).toString()); x}.take(30).foreach(println(_))
+  indexedNodes.take(10).foreach(println(_))
+  //val magellanNodes = nodes.rdd.map(node => Point(node.longitude,node.latitude) -> node).toDF()
+
+  //magellanNodes.join(magellanTilesRdd).where($"point" intersects $"polygon").show(25)
+  //magellanTilesRdd.join(magellanNodes).where($"point" within $"polygon").show(25)
   //val decoratedNodes = nodes.withColumn("elevation", lit(Int.MaxValue))
   //map(node => Node(node))
-  decoratedNodes.take(10).foreach(println(_))
-
-  tilesRDD
-  //relations.take(10).foreach(println(_))
+  //tmpRdd.take(10).foreach(println(_))
+  //decoratedNodes.take(10).foreach(println(_))
 
   // WAY decoration
-  //val decoratedWays = ways.map(way => )
+  val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
 
-  //filter(_.tags.toMap[String, String].contains("highway"))
-
-  //decoratedWays.take(50).foreach(println(_))
+  // RELATION decoration
+  //val relations = spark.read.schema().parquet(config.getString("osm.parquet.relations.path"))
 }
