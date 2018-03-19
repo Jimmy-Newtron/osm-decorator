@@ -3,16 +3,20 @@ package io.github.osmDecorator
 import java.net.URL
 
 import com.typesafe.config.ConfigFactory
+import geotrellis.geotools.GridCoverage2DConverters
 import geotrellis.raster._
-import geotrellis.spark.{Metadata, TileLayerMetadata, _}
 import geotrellis.spark.io.hadoop.Implicits._
 import geotrellis.spark.join.SpatialJoin
 import geotrellis.spark.partition._
 import geotrellis.spark.tiling.FloatingLayoutScheme
 import geotrellis.spark.util.SparkUtils
+import geotrellis.spark.{Metadata, TileLayerMetadata, _}
 import geotrellis.vector._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, SparkSession}
+import org.geotools.geometry.DirectPosition2D
+
+import scala.util.Try
 
 object OsmDecorator extends App {
 
@@ -36,7 +40,6 @@ object OsmDecorator extends App {
   // Prepare elevation raster layer
   val indexedTiles: RDD[(SpatialKey, Feature[Geometry, (ProjectedExtent, Tile)])] = tilesRDD.map { record => Feature(record._1.extent.toPolygon(), record) }.clipToGrid(layoutDefinition)
   val tilesLayer: RDD[(SpatialKey, Iterable[Feature[Geometry, (ProjectedExtent, Tile)]])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedTiles.groupByKey(spacePartitioner), rasterMetaData)
-  tilesLayer.map(record => record._1 -> record._2.reduce(_))
 
   // NODES decoration
   val nodes: Dataset[OsmNode] = spark.read.parquet(config.getString("osm.parquet.nodes.path")).as[OsmNode]
@@ -44,11 +47,8 @@ object OsmDecorator extends App {
   val indexedNodes: RDD[(SpatialKey, OsmNode)] = nodes.rdd.map(node => (layoutDefinition.mapTransform.pointToKey(node.longitude, node.latitude), node))
   val nodesLayer: RDD[(SpatialKey, Iterable[OsmNode])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedNodes.groupByKey(spacePartitioner), rasterMetaData)
 
-  val joinRdd = SpatialJoin.leftOuterJoin(tilesLayer, nodesLayer).filter(_._2._2.isDefined)
-  joinRdd.take(30).foreach(println(_))
-
-  //val decoratedNodes = nodes.withColumn("elevation", lit(Int.MaxValue))
-  //decoratedNodes.take(50).foreach(println(_))
+  val decoratedNodes = SpatialJoin.leftOuterJoin(nodesLayer, tilesLayer).flatMap(addElevation)
+  decoratedNodes.take(50).foreach(println(_))
 
   // WAY decoration
   val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
@@ -61,4 +61,20 @@ object OsmDecorator extends App {
   //val magellanNodes = nodes.rdd.map(node => Point(node.longitude,node.latitude) -> node).toDF()
   //magellanNodes.join(magellanTilesRdd).where($"point" intersects $"polygon").show(25)
   //magellanTilesRdd.join(magellanNodes).where($"point" within $"polygon").show(25)
+
+  // TODO: Ensure to get a precise elevation for every point
+  def addElevation(record: (SpatialKey, (Iterable[OsmNode], Option[Iterable[Feature[Geometry, (ProjectedExtent, Tile)]]]))): Iterable[(OsmNode, Double)] = {
+    val features = record._2._2.getOrElse(Seq.empty).map(feature => GridCoverage2DConverters.convertToGridCoverage2D(Raster(feature.data._2, feature.data._1.extent)))
+    record._2._1.map(
+      node => (node, average(features.map(
+        feature => Try(feature.evaluate(new DirectPosition2D(node.longitude, node.latitude))))
+        .filter(_.isSuccess)
+        .map(_.get.asInstanceOf[Array[Int]].head))
+      )
+    )
+  }
+
+  def average[T](ts: Iterable[T])(implicit num: Numeric[T]) = {
+    num.toDouble(ts.sum) / ts.size
+  }
 }
