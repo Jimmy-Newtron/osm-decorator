@@ -15,6 +15,7 @@ import geotrellis.vector._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, SparkSession}
 import org.geotools.geometry.DirectPosition2D
+import org.graphframes.GraphFrame
 
 import scala.util.Try
 
@@ -47,11 +48,38 @@ object OsmDecorator extends App {
   val indexedNodes: RDD[(SpatialKey, OsmNode)] = nodes.rdd.map(node => (layoutDefinition.mapTransform.pointToKey(node.longitude, node.latitude), node))
   val nodesLayer: RDD[(SpatialKey, Iterable[OsmNode])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedNodes.groupByKey(spacePartitioner), rasterMetaData)
 
-  val decoratedNodes = SpatialJoin.leftOuterJoin(nodesLayer, tilesLayer).flatMap(addElevation)
-  decoratedNodes.take(50).foreach(println(_))
+  val decoratedNodes = SpatialJoin.leftOuterJoin(nodesLayer, tilesLayer).flatMap(addElevation).toDS()
+  //decoratedNodes.show(50, false)
 
   // WAY decoration
   val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
+  ways.map(way => Way(way))
+    .filter(_.tags.contains("highway"))
+    //.filter(_.tags.contains("building"))
+    //.filter(!_.tags.contains("landuse"))
+    //.filter(!_.tags.contains("boundary"))
+    //.filter(!_.tags.contains("natural"))
+    //.filter(!_.tags.contains("waterway"))
+    //.filter(!_.tags.contains("railway"))
+    //.filter(!_.tags.contains("historic"))
+    //.filter(!_.tags.contains("leisure"))
+    //.filter(!_.tags.contains("amenity"))
+    //.filter(!_.tags.getOrElse("leisure",Set.empty).contains("swimming_pool"))
+    //.filter(!_.tags.getOrElse("leisure",Set.empty).contains("pitch"))
+    //.filter(!_.tags.getOrElse("amenity",Set.empty).contains("swimming_pool"))
+    //.filter(!_.tags.getOrElse("amenity",Set.empty).contains("school"))
+    //.filter(!_.tags.getOrElse("amenity",Set.empty).contains("parking"))
+    //.filter(_.tags.contains("barrier"))
+    //.filter(way => !way.tags.contains("highway") && way.nodes.head.nodeId.equals(way.nodes.last.nodeId))
+    .flatMap {
+    record => record.tags.toList.map(_ -> 1)
+  }.groupByKey(_._1).count().sort($"count(1)".desc)
+  //  .show(50, false)
+
+  val edges = ways.map(way => Way(way)).filter(_.tags.contains("highway")).flatMap(splitEdges)
+  edges.show(numRows = 50, truncate = false)
+
+  val graph = GraphFrame(decoratedNodes.toDF(), edges.toDF())
 
   // RELATION decoration
   //val relations = spark.read.schema().parquet(config.getString("osm.parquet.relations.path"))
@@ -62,19 +90,22 @@ object OsmDecorator extends App {
   //magellanNodes.join(magellanTilesRdd).where($"point" intersects $"polygon").show(25)
   //magellanTilesRdd.join(magellanNodes).where($"point" within $"polygon").show(25)
 
+  def splitEdges(record: Way): Iterable[Edge] = {
+    record.nodes.sliding(2).map(pair => Edge(pair(0).nodeId, pair(1).nodeId, record.id, record.metaData, record.tags)).toIterable
+  }
+
   // TODO: Ensure to get a precise elevation for every point
-  def addElevation(record: (SpatialKey, (Iterable[OsmNode], Option[Iterable[Feature[Geometry, (ProjectedExtent, Tile)]]]))): Iterable[(OsmNode, Double)] = {
+  def addElevation(record: (SpatialKey, (Iterable[OsmNode], Option[Iterable[Feature[Geometry, (ProjectedExtent, Tile)]]]))): Iterable[Node] = {
     val features = record._2._2.getOrElse(Seq.empty).map(feature => GridCoverage2DConverters.convertToGridCoverage2D(Raster(feature.data._2, feature.data._1.extent)))
     record._2._1.map(
-      node => (node, average(features.map(
+      node => Node(node, average(features.map(
         feature => Try(feature.evaluate(new DirectPosition2D(node.longitude, node.latitude))))
         .filter(_.isSuccess)
-        .map(_.get.asInstanceOf[Array[Int]].head))
-      )
+        .map(_.get.asInstanceOf[Array[Int]].head)))
     )
   }
 
   def average[T](ts: Iterable[T])(implicit num: Numeric[T]) = {
-    num.toDouble(ts.sum) / ts.size
+    Try(num.toDouble(ts.sum) / ts.size).toOption
   }
 }

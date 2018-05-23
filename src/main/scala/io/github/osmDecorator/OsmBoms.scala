@@ -2,10 +2,6 @@ package io.github.osmDecorator
 
 case class OsmTagElement(key: String, value: String)
 
-case class OsmNodeElement(index: Int, nodeId: Long)
-
-case class OsmMemberElement(id: Long, role: String, memberType: String)
-
 case class OsmNode(id: Long,
                 version: Int,
                 timestamp: Long,
@@ -16,6 +12,8 @@ case class OsmNode(id: Long,
                 latitude: Double,
                 longitude: Double)
 
+case class OsmNodeElement(index: Int, nodeId: Long)
+
 case class OsmWay(id: Long,
                version: Int,
                timestamp: Long,
@@ -24,6 +22,8 @@ case class OsmWay(id: Long,
                user_sid: String,
                tags: Array[OsmTagElement],
                nodes: Array[OsmNodeElement])
+
+case class OsmMemberElement(id: Long, role: String, memberType: String)
 
 case class OsmRelation(id: Long,
                     version: Int,

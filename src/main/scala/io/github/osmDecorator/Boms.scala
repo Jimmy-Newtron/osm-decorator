@@ -1,50 +1,64 @@
 package io.github.osmDecorator
 
-import io.github.osmDecorator.Types.{NodeElement, TagElement}
+import magellan.Point
 
-object Types {
-  type TagElement = (String, String)
-  type NodeElement = (Int, Long)
-  type MemberElement = (Long, String, String)
+case class MetaData(version: Int, timestamp: Long, changeset: Long, uid: Int, user_sid: String)
+
+case class NodeMetrics(elevation: Option[Double])
+
+case class Node(id: Long,
+                metaData: MetaData,
+                tags: Map[String, Set[String]],
+                kpis: NodeMetrics,
+                point: Point)
+
+object Node {
+  def apply(node: OsmNode): Node = Node(node, None)
+
+  def apply(node: OsmNode, elevation: Option[Double]): Node = Node(node.id,
+    MetaData(node.version, node.timestamp, node.changeset, node.uid, node.user_sid),
+    node.tags.groupBy(_.key).map(record => record._1 -> record._2.map(_.value).toSet),
+    NodeMetrics(elevation),
+    Point(node.longitude, node.latitude))
 }
 
-case class MetaData(version: Int,
-                    timestamp: Long,
-                    changeset: Long,
-                    uid: Int,
-                    user_sid: String)
 
-case class myPoint(latitude: Double,
-                 longitude: Double,
-                 elevation: Option[Double])
+/** *****************************/
 
-case class NodeMetrics()
 //belongToWays: Int
 //roadDensity: Double
 
 case class WayMetrics()
 
-case class Node(id: Long,
-                metaData: MetaData,
-                tags: Array[(String, String)],
-                kpis: NodeMetrics,
-                point: myPoint)
-
-object Node {
-  def apply(node: OsmNode): Node = new Node(node.id,
-    new MetaData(node.version, node.timestamp, node.changeset, node.uid, node.user_sid),
-    node.tags.map(elem => (elem.key, elem.value)),
-    new NodeMetrics(),
-    new myPoint(node.latitude, node.longitude, None))
-}
-
 case class Way(id: Long,
                metaData: MetaData,
-               tags: Array[TagElement],
-               kpis: WayMetrics,
-               nodes: Array[NodeElement])
+               tags: Map[String, Set[String]],
+               //kpis: WayMetrics,
+               nodes: Array[OsmNodeElement])
+
+object Way {
+  def apply(way: OsmWay): Way = Way(way.id,
+    MetaData(way.version, way.timestamp, way.changeset, way.uid, way.user_sid),
+    way.tags.groupBy(_.key).map(record => record._1 -> record._2.map(_.value).toSet),
+    //WayMetrics(),
+    way.nodes) // TODO: build the line polygon
+}
+
+/** *****************************/
+
+case class Edge(src: Long,
+                dst: Long,
+                id: Long,
+                metaData: MetaData,
+                tags: Map[String, Set[String]])
+
+/** *****************************/
+
+object Types {
+  type MemberElement = (Long, String, String)
+}
 
 /*case class Relation(id: Long,
                     metaData: MetaData,
-                    tags: Array[TagElement],
+                    tags: Map[String, Set[String]],
                     members: Array[MemberElement])*/
