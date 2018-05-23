@@ -53,42 +53,10 @@ object OsmDecorator extends App {
 
   // WAY decoration
   val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
-  ways.map(way => Way(way))
-    .filter(_.tags.contains("highway"))
-    //.filter(_.tags.contains("building"))
-    //.filter(!_.tags.contains("landuse"))
-    //.filter(!_.tags.contains("boundary"))
-    //.filter(!_.tags.contains("natural"))
-    //.filter(!_.tags.contains("waterway"))
-    //.filter(!_.tags.contains("railway"))
-    //.filter(!_.tags.contains("historic"))
-    //.filter(!_.tags.contains("leisure"))
-    //.filter(!_.tags.contains("amenity"))
-    //.filter(!_.tags.getOrElse("leisure",Set.empty).contains("swimming_pool"))
-    //.filter(!_.tags.getOrElse("leisure",Set.empty).contains("pitch"))
-    //.filter(!_.tags.getOrElse("amenity",Set.empty).contains("swimming_pool"))
-    //.filter(!_.tags.getOrElse("amenity",Set.empty).contains("school"))
-    //.filter(!_.tags.getOrElse("amenity",Set.empty).contains("parking"))
-    //.filter(_.tags.contains("barrier"))
-    //.filter(way => !way.tags.contains("highway") && way.nodes.head.nodeId.equals(way.nodes.last.nodeId))
-    .flatMap {
-    record => record.tags.toList.map(_ -> 1)
-  }.groupByKey(_._1).count().sort($"count(1)".desc)
-  //  .show(50, false)
-
   val edges = ways.map(way => Way(way)).filter(_.tags.contains("highway")).flatMap(splitEdges)
-  edges.show(numRows = 50, truncate = false)
+  //edges.show(numRows = 50, truncate = false)
 
   val graph = GraphFrame(decoratedNodes.toDF(), edges.toDF())
-
-  // RELATION decoration
-  //val relations = spark.read.schema().parquet(config.getString("osm.parquet.relations.path"))
-
-  // Magellan library
-  //val magellanTilesRdd = tilesRDD.map(tile=> (Polygon(Array(0),tile._1.extent.toPolygon().vertices.map(point => Point(point.x, point.y))) -> tile)).toDF()
-  //val magellanNodes = nodes.rdd.map(node => Point(node.longitude,node.latitude) -> node).toDF()
-  //magellanNodes.join(magellanTilesRdd).where($"point" intersects $"polygon").show(25)
-  //magellanTilesRdd.join(magellanNodes).where($"point" within $"polygon").show(25)
 
   def splitEdges(record: Way): Iterable[Edge] = {
     record.nodes.sliding(2).map(pair => Edge(pair(0).nodeId, pair(1).nodeId, record.id, record.metaData, record.tags)).toIterable
@@ -105,7 +73,7 @@ object OsmDecorator extends App {
     )
   }
 
-  def average[T](ts: Iterable[T])(implicit num: Numeric[T]) = {
+  def average[T](ts: Iterable[T])(implicit num: Numeric[T]): Option[Double] = {
     Try(num.toDouble(ts.sum) / ts.size).toOption
   }
 }

@@ -51,14 +51,3 @@ case class Edge(src: Long,
                 id: Long,
                 metaData: MetaData,
                 tags: Map[String, Set[String]])
-
-/** *****************************/
-
-object Types {
-  type MemberElement = (Long, String, String)
-}
-
-/*case class Relation(id: Long,
-                    metaData: MetaData,
-                    tags: Map[String, Set[String]],
-                    members: Array[MemberElement])*/

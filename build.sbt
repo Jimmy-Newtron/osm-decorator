@@ -9,9 +9,10 @@ libraryDependencies += "org.apache.spark" %% "spark-sql" % "2.3.0"
 resolvers += "Spark Packages Repo" at "http://dl.bintray.com/spark-packages/maven"
 libraryDependencies += "graphframes" % "graphframes" % "0.5.0-spark2.1-s_2.11"
 
-resolvers += "osgeo" at "http://download.osgeo.org/webdav/geotools/"
 resolvers += "geosolutions" at "http://maven.geo-solutions.it/"
 libraryDependencies += "org.locationtech.geotrellis" %% "geotrellis-spark"  % "1.2.1"
+
+resolvers += "osgeo" at "http://download.osgeo.org/webdav/geotools/"
 libraryDependencies += "org.locationtech.geotrellis" %% "geotrellis-geotools" % "1.2.1"
 
 resolvers += "spark-packages" at "http://dl.bintray.com/spark-packages/maven"
