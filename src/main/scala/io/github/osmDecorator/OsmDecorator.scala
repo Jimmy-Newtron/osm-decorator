@@ -1,6 +1,7 @@
 package io.github.osmDecorator
 
 import java.net.URL
+import java.nio.file.{Files, Paths}
 
 import com.typesafe.config.ConfigFactory
 import geotrellis.geotools.GridCoverage2DConverters
@@ -21,6 +22,8 @@ import scala.util.Try
 
 object OsmDecorator extends App {
 
+  private val forcedExecution = "override"
+
   // App Configuration
   val home = ConfigFactory.systemEnvironment().getString("HOME")
   val config = ConfigFactory.parseURL(new URL(s"file:///$home/Data/Configurations/OsmDecorator.conf")).resolve()
@@ -31,32 +34,49 @@ object OsmDecorator extends App {
 
   import spark.implicits._
 
-  // Load elevation from NASA files (GeoTiffs)
-  val demFolder = new URL(config.getString("dem.tiff.folder.path")).getPath
-  val tilesRDD: RDD[(ProjectedExtent, Tile)] = sc.hadoopGeoTiffRDD(demFolder)
-  // TileLayerMetadata preparation
-  val (_, rasterMetaData) = TileLayerMetadata.fromRdd(tilesRDD, FloatingLayoutScheme(64))
-  val layoutDefinition = rasterMetaData.layout
-  val spacePartitioner = SpacePartitioner(rasterMetaData.bounds)
-  // Prepare elevation raster layer
-  val indexedTiles: RDD[(SpatialKey, Feature[Geometry, (ProjectedExtent, Tile)])] = tilesRDD.map { record => Feature(record._1.extent.toPolygon(), record) }.clipToGrid(layoutDefinition)
-  val tilesLayer: RDD[(SpatialKey, Iterable[Feature[Geometry, (ProjectedExtent, Tile)]])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedTiles.groupByKey(spacePartitioner), rasterMetaData)
+  val verticesPath = new URL(config.getString("osm.parquet.vertices.path")).getPath
+  val decoratedNodes: Dataset[Node] = (Try(config.getBoolean(forcedExecution)).getOrElse(false), Files.exists(Paths.get(verticesPath))) match {
+    case (false, true) => spark.read.parquet(verticesPath).as[Node]
+    case (false, false) | (true, _) => {
+      // Load elevation from NASA files (GeoTiffs)
+      val demFolder = new URL(config.getString("dem.tiff.folder.path")).getPath
+      val tilesRDD: RDD[(ProjectedExtent, Tile)] = sc.hadoopGeoTiffRDD(demFolder)
+      // TileLayerMetadata preparation
+      val (_, rasterMetaData) = TileLayerMetadata.fromRdd(tilesRDD, FloatingLayoutScheme(64))
+      val layoutDefinition = rasterMetaData.layout
+      val spacePartitioner = SpacePartitioner(rasterMetaData.bounds)
+      // Prepare elevation raster layer
+      val indexedTiles: RDD[(SpatialKey, Feature[Geometry, (ProjectedExtent, Tile)])] = tilesRDD.map { record => Feature(record._1.extent.toPolygon(), record) }.clipToGrid(layoutDefinition)
+      val tilesLayer: RDD[(SpatialKey, Iterable[Feature[Geometry, (ProjectedExtent, Tile)]])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedTiles.groupByKey(spacePartitioner), rasterMetaData)
 
-  // NODES decoration
-  val nodes: Dataset[OsmNode] = spark.read.parquet(config.getString("osm.parquet.nodes.path")).as[OsmNode]
-  // Prepare elevation raster layer
-  val indexedNodes: RDD[(SpatialKey, OsmNode)] = nodes.rdd.map(node => (layoutDefinition.mapTransform.pointToKey(node.longitude, node.latitude), node))
-  val nodesLayer: RDD[(SpatialKey, Iterable[OsmNode])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedNodes.groupByKey(spacePartitioner), rasterMetaData)
+      // NODES decoration
+      val nodes: Dataset[OsmNode] = spark.read.parquet(config.getString("osm.parquet.nodes.path")).as[OsmNode]
+      // Prepare elevation raster layer
+      val indexedNodes: RDD[(SpatialKey, OsmNode)] = nodes.rdd.map(node => (layoutDefinition.mapTransform.pointToKey(node.longitude, node.latitude), node))
+      val nodesLayer: RDD[(SpatialKey, Iterable[OsmNode])] with Metadata[TileLayerMetadata[SpatialKey]] = ContextRDD(indexedNodes.groupByKey(spacePartitioner), rasterMetaData)
 
-  val decoratedNodes = SpatialJoin.leftOuterJoin(nodesLayer, tilesLayer).flatMap(addElevation).toDS()
-  //decoratedNodes.show(50, false)
+      val decoratedNodes = SpatialJoin.leftOuterJoin(nodesLayer, tilesLayer).flatMap(addElevation).toDS
+      decoratedNodes.write.parquet(verticesPath)
+      decoratedNodes
+    }
+  }
 
-  // WAY decoration
-  val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
-  val edges = ways.map(way => Way(way)).filter(_.tags.contains("highway")).flatMap(splitEdges)
-  //edges.show(numRows = 50, truncate = false)
+  val edgesPath = new URL(config.getString("osm.parquet.edges.path")).getPath
+  val edges: Dataset[Edge] = (Try(config.getBoolean(forcedExecution)).getOrElse(false), Files.exists(Paths.get(edgesPath))) match {
+    case (false, true) => spark.read.parquet(edgesPath).as[Edge]
+    case (false, false) | (true, _) => {
+      // WAY decoration
+      val ways = spark.read.parquet(config.getString("osm.parquet.ways.path")).as[OsmWay]
+      val edges = ways.map(way => Way(way)).filter(way => way.tags.contains("highway") && way.nodes.length > 1).flatMap(splitEdges)
+      edges.write.parquet(edgesPath)
+      edges
+    }
+  }
 
-  val graph = GraphFrame(decoratedNodes.toDF(), edges.toDF())
+  val graph = GraphFrame(decoratedNodes.toDF, edges.toDF).cache()
+  graph.triplets.schema.printTreeString()
+  graph.triplets.show(50, false)
+  graph.degrees.show(50, false)
 
   def splitEdges(record: Way): Iterable[Edge] = {
     record.nodes.sliding(2).map(pair => Edge(pair(0).nodeId, pair(1).nodeId, record.id, record.metaData, record.tags)).toIterable
