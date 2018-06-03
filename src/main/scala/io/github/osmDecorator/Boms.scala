@@ -4,7 +4,7 @@ import magellan.Point
 
 case class MetaData(version: Int, timestamp: Long, changeset: Long, uid: Int, user_sid: String)
 
-case class NodeMetrics(elevation: Option[Double])
+case class NodeMetrics(elevation: Option[Double], degree: Option[Integer])
 
 case class Node(id: Long,
                 metaData: MetaData,
@@ -18,7 +18,7 @@ object Node {
   def apply(node: OsmNode, elevation: Option[Double]): Node = Node(node.id,
     MetaData(node.version, node.timestamp, node.changeset, node.uid, node.user_sid),
     node.tags.groupBy(_.key).map(record => record._1 -> record._2.map(_.value).toSet),
-    NodeMetrics(elevation),
+    NodeMetrics(elevation, None),
     Point(node.longitude, node.latitude))
 }
 
